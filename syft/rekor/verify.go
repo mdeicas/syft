@@ -22,7 +22,6 @@ import (
 /*
 
 TODOs
-	- verify recieved SBOM against hash in attestation
 	- verify attestation signature, not hash
 	- TODOs in code comments
 	- make more robust
@@ -234,8 +233,11 @@ func verifyEntryTimestamp(cert *x509.Certificate, entry *models.LogEntryAnon) er
 // verify the attestation hash equals the hash in the rekor entry body.
 // *** This does NOT verify any signature.
 // No error means that the attestation we have and the attestation referenced in rekor are equal, NOT that it is what the user intended to upload ***
-func verifyAttestationHash(att string, entryBody *rekorBody) error {
+func verifyAttestationHash(entry *models.LogEntryAnon, entryBody *rekorBody) error {
 	// TODO: clean up decoding and add verification of signature
+
+	decodedAttString := string(entry.Attestation.Data)
+
 	alg := entryBody.Spec.Content.PayloadHash.Algorithm
 	if alg != "sha256" {
 		fmt.Println("Error verifying attestation has")
@@ -244,12 +246,12 @@ func verifyAttestationHash(att string, entryBody *rekorBody) error {
 
 	expectedHash := entryBody.Spec.Content.PayloadHash.Value
 
-	attBytes := []byte(att)
+	attBytes := []byte(decodedAttString)
 	hasher := sha256.New()
 	hasher.Write(attBytes)
 	hash := hasher.Sum(nil)
 
-	var decodedHash = fmt.Sprintf("%x", hash)
+	decodedHash := fmt.Sprintf("%x", hash)
 
 	if decodedHash != expectedHash {
 		return errors.New("the attestation hash could not be verified")
@@ -259,9 +261,14 @@ func verifyAttestationHash(att string, entryBody *rekorBody) error {
 	return nil
 }
 
-func getSbom(att *inTotoAttestation) ([]byte, error) {
+func verifySbom(sbomBytes []byte, expectedHash string) error {
 
-	// TODO: validate
+	return nil
+}
+
+func getAndVerifySbom(att *inTotoAttestation) ([]byte, error) {
+
+	// TODO: what to do with multiple SBOMs
 	uri := att.Predicate.Sboms[0].Uri
 
 	var emptyReader io.Reader
@@ -286,6 +293,21 @@ func getSbom(att *inTotoAttestation) ([]byte, error) {
 	}
 
 	fmt.Printf("\nSBOM (%v bytes) retrieved \n", len(bytes))
+
+	expectedHash := att.Predicate.Sboms[0].Digest.Sha256
+
+	hasher := sha256.New()
+	hasher.Write(bytes)
+	hash := hasher.Sum(nil)
+	decodedHash := fmt.Sprintf("%x", hash)
+
+	if decodedHash != expectedHash {
+		fmt.Println("SBOM hash and expected hash from attestation do not match")
+		return nil, err
+	}
+
+	fmt.Println("\nSBOM hash verified")
+
 	return bytes, nil
 
 }
@@ -323,13 +345,12 @@ func verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEnt
 		return err
 	}
 
-	attStr := string(entry.Attestation.Data)
-	err = verifyAttestationHash(attStr, entryBody)
+	err = verifyAttestationHash(entry, entryBody)
 	if err != nil {
 		return err
 	}
 
-	_, err = getSbom(att)
+	_, err = getAndVerifySbom(att)
 	if err != nil {
 		return err
 	}

@@ -8,6 +8,14 @@ import (
 	"github.com/sigstore/rekor/pkg/generated/models"
 )
 
+/*
+TODOs
+	- map SBOM to syft type (utilize built in SPDX -> _ converters?!!!!)
+	- integrate into Syft
+	- in future, fix TODOs in rekor.go and verify.go
+
+*/
+
 func main() {
 
 	//sha := "7556f2bf9edc3f1da13cf23715636573bab3e18883977eacd9667441618faf14"
