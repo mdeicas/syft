@@ -11,9 +11,7 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/anchore/syft/internal/formats/spdx22tagvalue"
-	"github.com/anchore/syft/internal/formats/syftjson"
-	sbompkg "github.com/anchore/syft/syft/sbom"
+	"github.com/anchore/syft/internal/log"
 	"github.com/sigstore/cosign/pkg/cosign"
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/spdx/tools-golang/spdx"
@@ -94,12 +92,6 @@ func pprintStruct(v any) {
 // decode and parse certificate
 func parseCert(decodedCert string) (*x509.Certificate, error) {
 
-	// decodedCert, err := base64.StdEncoding.DecodeString(encodedCert)
-	// if err != nil {
-	// 	fmt.Println("Error decoding base64 encoded certificate")
-	// 	return nil, err
-	// }
-
 	pem, _ := pem.Decode([]byte(decodedCert))
 	if pem == nil {
 		return nil, errors.New("certificate could not be found")
@@ -107,7 +99,7 @@ func parseCert(decodedCert string) (*x509.Certificate, error) {
 
 	cert, err := x509.ParseCertificate(pem.Bytes)
 	if err != nil {
-		fmt.Println("Error parsing x509 certificate")
+		log.Debug("Error parsing x509 certificate")
 		return nil, err
 	}
 	return cert, err
@@ -123,45 +115,46 @@ func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
 
 	bodyDecoded, err := base64.StdEncoding.DecodeString(bodyEncoded)
 	if err != nil {
-		fmt.Println("Error base64 decoding body")
+		log.Debug("Error base64 decoding body")
 		return nil, err
 	}
 
 	var intoto *models.Intoto = new(models.Intoto)
 	err = intoto.UnmarshalBinary(bodyDecoded)
 	if err != nil {
-		fmt.Println("Error unmarshaling json entry body to intoto")
+		log.Debug("Error unmarshaling json entry body to intoto")
 		return nil, err
 	}
 
 	// TODO: validate
 	if *intoto.APIVersion != "0.0.1" {
-		fmt.Println("Error parsing rekor entry body")
+		log.Debug("Error parsing rekor entry body")
 		err := fmt.Sprintf("intoto schema version %v not supported", *intoto.APIVersion)
 		return nil, errors.New(err)
 	}
 
 	specBytes, err := json.Marshal(intoto.Spec)
 	if err != nil {
-		fmt.Println("error marshaling intoto spec to json")
+		log.Debug("error marshaling intoto spec to json")
 		return nil, err
 	}
 
 	intotoV001 := new(models.IntotoV001Schema)
 	err = intotoV001.UnmarshalBinary(specBytes)
 	if err != nil {
-		fmt.Println("Error unmarshaling intoto spec to intotoV001 schema")
+		log.Debug("Error unmarshaling intoto spec to intotoV001 schema")
+		return nil, err
 	}
 
 	return intotoV001, err
 }
 
 // parse the attestation and unmarshal json
-func ParseAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
+func parseAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
 
 	attAnon := entry.Attestation
 	if attAnon == nil {
-		fmt.Println("Error parsing attestation")
+		log.Debug("Error parsing attestation")
 		return nil, errors.New("log entry attestation is nil")
 	}
 
@@ -171,16 +164,16 @@ func ParseAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
 	att := new(inTotoAttestation)
 	err := json.Unmarshal([]byte(attDecoded), att)
 	if err != nil {
-		fmt.Println("Error parsing attestation")
+		log.Debug("Error parsing attestation")
 		return nil, err
 	}
 
 	if att.PredicateType == "" {
-		fmt.Println("Error parsing attestation")
+		log.Debug("Error parsing attestation")
 		return nil, errors.New("attestation predicate type was not found")
 	}
 	if att.PredicateType != "http://lumjjb/sbom-documents" {
-		fmt.Println("Error parsing attestation")
+		log.Debug("Error parsing attestation")
 		return nil, errors.New("in-toto predicate type is not recognized by Syft")
 	}
 
@@ -190,57 +183,14 @@ func ParseAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
 
 }
 
-func writeSbomSpdx(sbom *sbompkg.SBOM) error {
-
-	filepath := "./spdx-type-sbom.spdx"
-
-	writerOpts := sbompkg.NewWriterOption(spdx22tagvalue.Format(), filepath)
-	writer, err := sbompkg.NewWriter(writerOpts)
-	if err != nil {
-		fmt.Println("Error writing spdx SBOM")
-		return err
-	}
-
-	err = writer.Write(*sbom)
-	if err != nil {
-		fmt.Println("Error writing spdx SBOM")
-		return err
-	}
-
-	fmt.Println("SBOM written to", filepath)
-	return nil
-}
-
-func writeSbomSyft(sbom *sbompkg.SBOM) error {
-
-	filepath := "./syft-type-sbom.json"
-
-	writerOpts := sbompkg.NewWriterOption(syftjson.Format(), filepath)
-	writer, err := sbompkg.NewWriter(writerOpts)
-	if err != nil {
-		fmt.Println("Error writing syft SBOM")
-		return err
-	}
-
-	err = writer.Write(*sbom)
-	if err != nil {
-		fmt.Println("Error writing syft SBOM")
-		return err
-	}
-
-	fmt.Println("SBOM written to", filepath)
-	return nil
-}
-
-// map SPDX to syft native type
-func ParseSbom(spdxBytes []byte) (*spdx.Document2_2, error) {
+func parseSbom(spdxBytes []byte) (*spdx.Document2_2, error) {
 
 	//remove all SHA512 hashes because spdx/tools-golang does not support
 	// PR fix is filed but not merged
 
 	regex, err := regexp.Compile("\n.*SHA512.*")
 	if err != nil {
-		fmt.Println("Error decoding sbom to syft type")
+		log.Debug("Error decoding sbom to syft type")
 		return nil, err
 	}
 
@@ -250,16 +200,13 @@ func ParseSbom(spdxBytes []byte) (*spdx.Document2_2, error) {
 
 	sbom, err := tvloader.Load2_2(bytes.NewReader(spdxBytes))
 	if err != nil {
-		fmt.Println("Error loading sbom bytes into spdx type")
+		log.Debug("Error loading sbom bytes into spdx type")
 		return nil, err
 	}
 
 	return sbom, nil
-
 }
 
-func GetSbomData(sbom *spdx.Document2_2) string {
-
+func getSbomData(sbom *spdx.Document2_2) string {
 	return sbom.CreationInfo.DocumentNamespace
-
 }

@@ -1,19 +1,10 @@
 package main
 
 import (
-	"context"
 	"fmt"
 
 	rekor "github.com/anchore/syft/syft/rekor/queryRekor"
-	"github.com/sigstore/rekor/pkg/generated/models"
 )
-
-/*
-TODOs
-	- integrate into Syft
-	- how to output obtained SBOM
-	- fix TODOs
-*/
 
 func main() {
 
@@ -26,51 +17,7 @@ func main() {
 		return
 	}
 
-	uuids, err := rekor.GetUuids(sha, client)
-	if err != nil {
-		fmt.Println("error", err)
-		return
-	}
-
-	// for now, take the first uuid returned
-	logEntries, err := rekor.GetRekorEntry(uuids[0], client)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	// there can be multiple entries, not all of them SBOM
-	var logEntry models.LogEntryAnon
-	for k := range logEntries {
-		logEntry = logEntries[k]
-	}
-
-	ctx := context.Background()
-
-	err = rekor.Verify(ctx, client, &logEntry)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	att, err := rekor.ParseAttestation(&logEntry)
-	if err != nil {
-		fmt.Println("no error should occur here but one did")
-		fmt.Println("err")
-		return
-	}
-
-	sbomBytes, err := rekor.GetSbom(att)
-	if err != nil {
-		return
-	}
-
-	err = rekor.VerifySbomHash(att, sbomBytes)
-	if err != nil {
-		return
-	}
-
-	_, err = rekor.ParseSbom(sbomBytes)
+	_, err = rekor.GetAndVerifySbom(sha, client)
 	if err != nil {
 		fmt.Println(err)
 		return
