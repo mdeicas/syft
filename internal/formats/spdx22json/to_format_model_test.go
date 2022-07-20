@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/anchore/syft/syft/pkg"
+	"github.com/anchore/syft/syft/rekor/queryRekor"
 
 	"github.com/anchore/syft/syft/file"
 
@@ -14,6 +15,73 @@ import (
 	"github.com/anchore/syft/syft/source"
 	"github.com/stretchr/testify/assert"
 )
+
+func Test_toExternalDocumentRefs(t *testing.T) {
+
+	package_1 := pkg.Package{
+		Name: "Hello World Package 1",
+	}
+	package_2 := pkg.Package{
+		Name: "Hello World Package 2",
+	}
+	externalRef_1 := queryRekor.NewExternalRef("HelloWorld", "www.example.com", "SHA1", "bogushash")
+	externalRef_2 := queryRekor.NewExternalRef("HelloWorld", "www.example.com", "sha1", "bogushash")
+
+	tests := []struct {
+		name          string
+		relationships []artifact.Relationship
+		expected      []model.ExternalDocumentRef
+	}{
+		{
+			name: "empty",
+		},
+		{
+			name: "Both external relationships and non external relationships",
+			relationships: []artifact.Relationship{
+				{
+					From: package_1,
+					To:   package_2,
+					Type: artifact.ContainsRelationship,
+				},
+				{
+					From: package_1,
+					To:   externalRef_1,
+					Type: artifact.ContainsRelationship,
+				},
+			},
+			expected: []model.ExternalDocumentRef{
+				{
+					ExternalDocumentID: model.ElementID(externalRef_1.ID()).String(),
+					Checksum:           model.Checksum{Algorithm: "SHA1", ChecksumValue: "bogushash"},
+					SpdxDocument:       externalRef_1.SpdxRef.URI,
+				},
+			},
+		},
+		{
+			name: "Lowercase checksum algorithm",
+			relationships: []artifact.Relationship{
+				{
+					From: package_1,
+					To:   externalRef_2,
+					Type: artifact.ContainsRelationship,
+				},
+			},
+			expected: []model.ExternalDocumentRef{
+				{
+					ExternalDocumentID: model.ElementID(externalRef_1.ID()).String(),
+					Checksum:           model.Checksum{Algorithm: "SHA1", ChecksumValue: "bogushash"},
+					SpdxDocument:       externalRef_1.SpdxRef.URI,
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.ElementsMatch(t, test.expected, toExternalDocumentRefs(test.relationships))
+		})
+	}
+}
 
 func Test_toFileTypes(t *testing.T) {
 

@@ -14,6 +14,7 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+	"github.com/anchore/syft/syft/rekor/queryRekor"
 	"github.com/anchore/syft/syft/sbom"
 	"github.com/anchore/syft/syft/source"
 )
@@ -37,12 +38,34 @@ func toFormatModel(s sbom.SBOM) *model.Document {
 			},
 			LicenseListVersion: spdxlicense.Version,
 		},
-		DataLicense:       "CC0-1.0",
-		DocumentNamespace: namespace,
-		Packages:          toPackages(s.Artifacts.PackageCatalog, s.Relationships),
-		Files:             toFiles(s),
-		Relationships:     toRelationships(s.Relationships),
+		DataLicense:          "CC0-1.0",
+		ExternalDocumentRefs: toExternalDocumentRefs(s.Relationships),
+		DocumentNamespace:    namespace,
+		Packages:             toPackages(s.Artifacts.PackageCatalog, s.Relationships),
+		Files:                toFiles(s),
+		Relationships:        toRelationships(s.Relationships),
 	}
+}
+
+func toExternalDocumentRefs(relationships []artifact.Relationship) []model.ExternalDocumentRef {
+	var externalRefs []model.ExternalDocumentRef
+	for _, rel := range relationships {
+
+		externalRef, ok := rel.To.(queryRekor.ExternalRef)
+		if ok {
+			externalRefDocument := model.ExternalDocumentRef{
+				ExternalDocumentID: model.ElementID(rel.To.ID()).String(),
+				Checksum: model.Checksum{
+					Algorithm:     toChecksumAlgorithm(externalRef.SpdxRef.Alg),
+					ChecksumValue: externalRef.SpdxRef.Checksum,
+				},
+				SpdxDocument: externalRef.SpdxRef.URI,
+			}
+			externalRefs = append(externalRefs, externalRefDocument)
+		}
+
+	}
+	return externalRefs
 }
 
 func toPackages(catalog *pkg.Catalog, relationships []artifact.Relationship) []model.Package {
