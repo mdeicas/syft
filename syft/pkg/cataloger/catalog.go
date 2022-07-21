@@ -113,12 +113,12 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 			log.Debugf("%v files found in location %v", len(files), loc.RealPath)
 		}
 
-		rel, err := queryRekor.CreateRekorSbomRel(resolver, loc)
+		rels, err := queryRekor.CreateRekorSbomRels(resolver, loc)
 		if err != nil {
 			log.Debug(err)
 		}
-		if rel != nil {
-			allRelationships = append(allRelationships, *rel)
+		if len(rels) != 0 {
+			allRelationships = append(allRelationships, rels...)
 		}
 	}
 

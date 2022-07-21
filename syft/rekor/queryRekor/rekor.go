@@ -11,44 +11,49 @@ import (
 	"github.com/sigstore/rekor/pkg/generated/client/entries"
 	"github.com/sigstore/rekor/pkg/generated/client/index"
 	"github.com/sigstore/rekor/pkg/generated/models"
-	"github.com/spdx/tools-golang/spdx"
 )
 
 const (
 	DefaultRekorAddr = "https://rekor.sigstore.dev"
 )
 
-func getSbom(att *inTotoAttestation) ([]byte, error) {
-	// TODO: deal with multiple sboms
-	uri := att.Predicate.Sboms[0].Uri
+func getSboms(atts []inTotoAttestation) map[*inTotoAttestation][]byte {
 
-	req, err := http.NewRequest("GET", uri, nil)
-	if err != nil {
-		log.Debug("Error creating SBOM request")
-		return nil, err
+	sbomsBytes := make(map[*inTotoAttestation][]byte)
+	for _, att := range atts {
+		if len(att.Predicate.Sboms) > 1 {
+			log.Info("Attestation found on Rekor with multiple sboms, which is not currently supported")
+		}
+		uri := att.Predicate.Sboms[0].Uri
+
+		req, err := http.NewRequest("GET", uri, nil)
+		if err != nil {
+			log.Debug("Error creating SBOM request: ", err)
+			continue
+		}
+
+		client := http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Debug("Error making SBOM request: ", err)
+			continue
+		}
+
+		bytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Debug("Error reading SBOM response: ", err)
+			continue
+		}
+
+		log.Debugf("SBOM (%v bytes) retrieved", len(bytes))
+		sbomsBytes[&att] = bytes
 	}
 
-	client := http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Debug("Error making SBOM request")
-		return nil, err
-	}
-
-	bytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Debug("Error reading SBOM response")
-		return nil, err
-	}
-
-	log.Debugf("SBOM (%v bytes) retrieved", len(bytes))
-	return bytes, nil
+	return sbomsBytes
 }
 
 // retrieve Rekor entries associated with an sha hash and return their UUIDS
 func getUuids(sha string, client *client.Rekor) ([]string, error) {
-	// TODO: deal with no entries being returned
-	// set up query
 	query := &models.SearchIndex{Hash: sha}
 	var params *index.SearchIndexParams = index.NewSearchIndexParams().WithQuery(query)
 
@@ -61,20 +66,23 @@ func getUuids(sha string, client *client.Rekor) ([]string, error) {
 	return payload, nil
 }
 
-// retrieve a Rekor entry by its UUID
-func getRekorEntry(uuid string, client *client.Rekor) (models.LogEntry, error) {
-	// TODO: models.LogEntry is a map from strings to LogEntryAnon. In what case would there by multiple entries returned?
+// retrieve rekor entries from a list of uuids
+func getRekorEntries(uuids []string, client *client.Rekor) ([]models.LogEntryAnon, error) {
+	var rekorEntries []models.LogEntryAnon
+	for _, uuid := range uuids {
+		params := entries.NewGetLogEntryByUUIDParams().WithEntryUUID(uuid)
+		res, err := client.Entries.GetLogEntryByUUID(params)
+		if err != nil {
+			log.Debug("error getting rekor entry by uuid")
+			return nil, err
+		}
 
-	params := entries.NewGetLogEntryByUUIDParams().WithEntryUUID(uuid)
-	res, err := client.Entries.GetLogEntryByUUID(params)
-	if err != nil {
-		log.Debug("error getting rekor entry by uuid")
-		return nil, err
+		// TODO: why could there be multiple entries
+		for _, v := range res.Payload {
+			rekorEntries = append(rekorEntries, v)
+		}
 	}
-
-	var payload models.LogEntry = res.Payload
-	return payload, nil
-
+	return rekorEntries, nil
 }
 
 func NewRekorClient() (*client.Rekor, error) {
@@ -86,60 +94,60 @@ func NewRekorClient() (*client.Rekor, error) {
 	return client, nil
 }
 
-func GetAndVerifySbom(sha string, client *client.Rekor) (*spdx.Document2_2, error) {
-
+// retrieve SBOMs from Rekor by artifact hash and verify that the log entry exists, verify the signing certificate by
+// verification options, and check the sbom hash
+func GetAndVerifySboms(sha string, client *client.Rekor) ([]spdxSbomWithMetadata, error) {
 	uuids, err := getUuids(sha, client)
 	if err != nil {
 		return nil, err
 	}
-
 	if len(uuids) == 0 {
 		return nil, nil
 	}
 
-	logEntries, err := getRekorEntry(uuids[0], client)
-	if err != nil {
+	anonEntries, err := getRekorEntries(uuids, client)
+	if len(anonEntries) == 0 {
 		return nil, err
 	}
-
-	// TODO: only get SBOM entries
-	var logEntry models.LogEntryAnon
-	for k := range logEntries {
-		logEntry = logEntries[k]
+	for _, anonEntry := range anonEntries {
+		log.Infof("Rekor entry/s retrieved \n\t\tlogIndex: %v ", *anonEntry.LogIndex)
 	}
-
-	log.Infof("Rekor entry was retrieved \n\t\tlogIndex: %v ", logEntry.LogIndex)
 
 	ctx := context.Background()
-
-	err = Verify(ctx, client, &logEntry)
-	if err != nil {
+	verifiedAnonEntries := Verify(ctx, client, anonEntries)
+	if len(verifiedAnonEntries) == 0 {
 		return nil, nil
 	}
-
-	att, err := parseAttestation(&logEntry)
-	if err != nil {
-		log.Debug("no error should occur here but one did")
-		log.Debug("err")
-		return nil, nil
-	}
-
-	sbomBytes, err := getSbom(att)
-	if err != nil {
-		return nil, nil
-	}
-
-	err = VerifySbomHash(att, sbomBytes)
-	if err != nil {
-		return nil, nil
-	}
-
-	sbom, err := parseSbom(sbomBytes)
+	atts, err := parseAndValidateAttestations(verifiedAnonEntries)
 	if err != nil {
 		log.Debug(err)
-		return nil, err
+		return nil, nil
+	}
+	if len(atts) == 0 {
+		return nil, nil
 	}
 
-	return sbom, nil
+	sbomsBytes := getSboms(atts)
+	if len(sbomsBytes) == 0 {
+		// TODO: not being able to retrieve SBOM should not stop queryRekor functionality (e.g. sbom could require permissions)
+		log.Debugf("Sbom attestation(s) found on Rekor, but the sbom(s) could not be retrieved. ")
+		return nil, nil
+	}
 
+	verifiedSbomsBytes := VerifySbomsHashes(sbomsBytes)
+	if len(verifiedSbomsBytes) == 0 {
+		log.Debugf("Sbom attestation(s) found on Rekor, but the sbom(s) hash(es) could not be verified")
+		return nil, nil
+	}
+
+	sboms, err := parseSboms(verifiedSbomsBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(sboms) == 0 {
+		log.Debugf("Sbom(s) found on Rekor and retrieved, but could not be parsed")
+		return nil, nil
+	}
+
+	return joinSbomsWithMetadata(sboms), nil
 }

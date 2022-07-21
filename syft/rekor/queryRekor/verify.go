@@ -15,13 +15,6 @@ import (
 	"github.com/sigstore/rekor/pkg/generated/models"
 )
 
-/*
-TODOs
-	- make more robust
-		- gracefully handle missing fields, make more robust, etc. structs, after marshalling, could have missing fields.
-		- deal with different attestation and different predicate types
-*/
-
 // verify the inclusion proof
 func verifyLogEntry(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEntryAnon) error {
 	err := cosign.VerifyTLogEntry(ctx, rekorClient, entry)
@@ -46,8 +39,6 @@ func verifyCert(rekorClient *client.Rekor, cert *x509.Certificate) error {
 		return err
 	}
 
-	// would use the verifier returned by the previous call to verify the signature over the attestation
-
 	return nil
 }
 
@@ -59,10 +50,9 @@ func verifyEntryTimestamp(cert *x509.Certificate, entry *models.LogEntryAnon) er
 
 // verify the attestation hash equals the hash in the rekor entry body.
 // *** This does NOT verify any signature.
-// No error means that the attestation we have and the attestation referenced in rekor are equal, NOT that it is what the user intended to upload ***
+// No error means that the attestation we have and the attestation referenced in rekor are equal, NOT that it is what the user intended to upload.
+// We trust rekor to verify signature ***
 func verifyAttestationHash(encounteredAttestation string, intotoV001 *models.IntotoV001Schema) error {
-
-	// TODO: clean up decoding and add verification of signature
 
 	attBytes := []byte(encounteredAttestation)
 	hasher := sha256.New()
@@ -84,60 +74,63 @@ func verifyAttestationHash(encounteredAttestation string, intotoV001 *models.Int
 	return nil
 }
 
-// verify the log entry is in Rekor, the certificate is valid, the log entry timestamp is valid, and the attestation hash is correct
-func Verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEntryAnon) error {
+// verify the log entry is in Rekor, the certificate is valid, the log entry timestamp is valid, and the attestation hash is correct.
+// Returns all entries that have been verified
+func Verify(ctx context.Context, rekorClient *client.Rekor, entries []models.LogEntryAnon) []models.LogEntryAnon {
 
-	err := verifyLogEntry(ctx, rekorClient, entry)
-	if err != nil {
-		return err
-	}
+	var verifiedEntries []models.LogEntryAnon
+	for _, entry := range entries {
+		err := verifyLogEntry(ctx, rekorClient, &entry)
+		if err != nil {
+			continue
+		}
 
-	intotoV001, err := parseEntry(entry)
-	if err != nil {
-		return err
-	}
+		intotoV001, err := parseEntry(&entry)
+		if err != nil {
+			continue
+		}
 
-	cert, err := parseCert(string(*intotoV001.PublicKey))
-	if err != nil {
-		return err
-	}
+		cert, err := parseCert(string(*intotoV001.PublicKey))
+		if err != nil {
+			continue
+		}
 
-	err = verifyCert(rekorClient, cert)
-	if err != nil {
-		return err
-	}
+		err = verifyCert(rekorClient, cert)
+		if err != nil {
+			continue
+		}
 
-	err = verifyEntryTimestamp(cert, entry)
-	if err != nil {
-		return err
-	}
+		err = verifyEntryTimestamp(cert, &entry)
+		if err != nil {
+			continue
+		}
 
-	err = verifyAttestationHash(string(entry.Attestation.Data), intotoV001)
-	if err != nil {
-		return err
-	}
+		err = verifyAttestationHash(string(entry.Attestation.Data), intotoV001)
+		if err != nil {
+			continue
+		}
 
-	if err == nil {
+		verifiedEntries = append(verifiedEntries, entry)
 		log.Debugf("Verification of Rekor entry %v complete", *entry.LogIndex)
 	}
-
-	return nil
+	return verifiedEntries
 }
 
-func VerifySbomHash(att *inTotoAttestation, sbomBytes []byte) error {
+// verify that the sbom hash matches the expected hash in the attestation. Return the succesfully verified sboms
+func VerifySbomsHashes(sboms map[*inTotoAttestation][]byte) map[*inTotoAttestation][]byte {
 
-	expectedHash := att.Predicate.Sboms[0].Digest.Sha256
+	verifiedSboms := make(map[*inTotoAttestation][]byte)
+	for att, sbomBytes := range sboms {
+		expectedHash := att.Predicate.Sboms[0].Digest.Sha256
 
-	hasher := sha256.New()
-	hasher.Write(sbomBytes)
-	hash := hasher.Sum(nil)
-	decodedHash := fmt.Sprintf("%x", hash)
+		hasher := sha256.New()
+		hasher.Write(sbomBytes)
+		hash := hasher.Sum(nil)
+		decodedHash := fmt.Sprintf("%x", hash)
 
-	if decodedHash != expectedHash {
-		log.Debug("Error verifying Sbom hash")
-		return errors.New("SBOM hash and expected hash from attestation do not match")
+		if decodedHash == expectedHash {
+			verifiedSboms[att] = sbomBytes
+		}
 	}
-
-	return nil
-
+	return verifiedSboms
 }

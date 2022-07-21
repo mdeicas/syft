@@ -2,7 +2,6 @@ package queryRekor
 
 import (
 	"crypto"
-	"errors"
 	"fmt"
 
 	"github.com/anchore/syft/internal/log"
@@ -37,7 +36,7 @@ func NewExternalRef(docRef string, uri string, algo string, hash string) Externa
 	}
 }
 
-func CreateRekorSbomRel(resolver source.FileResolver, location source.Location) (*artifact.Relationship, error) {
+func CreateRekorSbomRels(resolver source.FileResolver, location source.Location) ([]artifact.Relationship, error) {
 
 	closer, err := resolver.FileContentsByLocation(location)
 	if err != nil {
@@ -50,18 +49,7 @@ func CreateRekorSbomRel(resolver source.FileResolver, location source.Location) 
 		return nil, err
 	}
 
-	var sha1 string
-	var sha256 string
-	if digests[0].Algorithm == "sha1" && digests[1].Algorithm == "sha256" {
-		sha1 = digests[0].Value
-		sha256 = digests[1].Value
-	} else if digests[0].Algorithm == "sha256" && digests[1].Algorithm == "sha1" {
-		sha256 = digests[0].Value
-		sha1 = digests[1].Value
-	} else {
-		log.Debug("Unexpected digests")
-		return nil, nil
-	}
+	sha1, sha256 := parseDigests(digests)
 
 	log.Debugf("Rekor is being queried for \n\t\tLocation: %v \n\t\tSHA1: %v \n\t\tSHA256: %v", location.RealPath, sha1, sha256)
 
@@ -71,34 +59,29 @@ func CreateRekorSbomRel(resolver source.FileResolver, location source.Location) 
 		return nil, err
 	}
 
-	sbom, err := GetAndVerifySbom(sha256, client)
+	sboms, err := GetAndVerifySboms(sha256, client)
 	if err != nil {
-		log.Debug("Error retrieving or verifying sbom")
+		log.Debug("Error retrieving or verifying sbom(s)")
 		return nil, err
 	}
-	if sbom == nil {
-		log.Debug("No sbom found on rekor")
+	if len(sboms) == 0 {
+		log.Debug("No sboms found on rekor")
 		return nil, err
 	}
 
-	namespace := sbom.CreationInfo.DocumentNamespace
-	if namespace == "" {
-		log.Debug("namespace for SBOM is nil")
-		return nil, errors.New("sbomError")
+	var rels []artifact.Relationship
+	for _, sbom := range sboms {
+		externalRef := NewExternalRef("sample-golang-prov", sbom.namespace, "SHA1", sha1)
+		rel := artifact.Relationship{
+			From: location,
+			To:   externalRef,
+			Type: artifact.ContainsRelationship,
+			Data: fmt.Sprintf("External reference metadata: %+v", externalRef.SpdxRef),
+		}
+		rels = append(rels, rel)
+		log.Debugf("Relationship created for SBOM found on Rekor \n\t\tFrom: %v \n\t\tTo: %v", rel.From.ID(), rel.To.ID())
 	}
 
-	// TODO - get package name from inside SBOM or from attestation.build-metadata?
-	externalRef := NewExternalRef("sample-golang-prov", namespace, "SHA1", sha1)
-
-	rel := &artifact.Relationship{
-		From: location,
-		To:   externalRef,
-		Type: artifact.ContainsRelationship,
-		Data: fmt.Sprintf("External reference metadata: %+v", externalRef.SpdxRef),
-	}
-
-	log.Debugf("Relationship created for SBOM found on Rekor \n\t\tFrom: %v \n\t\tTo: %v", rel.From.ID(), rel.To.ID())
-
-	return rel, nil
+	return rels, nil
 
 }

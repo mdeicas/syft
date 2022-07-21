@@ -8,10 +8,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 
 	"github.com/anchore/syft/internal/log"
+	"github.com/anchore/syft/syft/file"
 	"github.com/sigstore/cosign/pkg/cosign"
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/spdx/tools-golang/spdx"
@@ -31,6 +31,12 @@ var certCheckOpts = &cosign.CheckOpts{
 	// Why is there an option to prove sigVerifier?
 	// addresses after SAN. what is this and should we check it
 
+}
+
+type spdxSbomWithMetadata struct {
+	sbom        spdx.Document2_2
+	packageName string
+	namespace   string // i.e.  uri
 }
 
 type digest struct {
@@ -149,64 +155,120 @@ func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
 	return intotoV001, err
 }
 
-// parse the attestation and unmarshal json
-func parseAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
+// parse the attestation and validate that it fits the inTotoAttestation type
+func parseAndValidateAttestations(entries []models.LogEntryAnon) ([]inTotoAttestation, error) {
 
-	attAnon := entry.Attestation
-	if attAnon == nil {
-		log.Debug("Error parsing attestation")
-		return nil, errors.New("log entry attestation is nil")
+	var atts []inTotoAttestation
+	for _, entry := range entries {
+		attAnon := entry.Attestation
+		if attAnon == nil {
+			log.Debug("Error parsing attestation")
+			return nil, errors.New("log entry attestation is nil")
+		}
+
+		// this decodes the base64 string
+		attDecoded := string(attAnon.Data)
+
+		att := new(inTotoAttestation)
+		err := json.Unmarshal([]byte(attDecoded), att)
+		if err != nil {
+			log.Debug("Error parsing attestation")
+			return nil, err
+		}
+
+		// validation the entry is an sbom entry is done by validating attestation struct
+		if att.PredicateType == "" {
+			log.Debugf("Rekor entry %v could not be parsed as an sbom entry", *entry.LogIndex)
+			continue
+		}
+		if att.PredicateType != "http://lumjjb/sbom-documents" {
+			log.Debugf("Rekor entry %v could not be parsed as an sbom entry", *entry.LogIndex)
+			continue
+		}
+		if att.Predicate.Sboms == nil {
+			log.Debugf("Rekor entry %v could not be parsed as an sbom entry", *entry.LogIndex)
+			continue
+		}
+
+		atts = append(atts, *att)
 	}
 
-	// this decodes the base64 string
-	attDecoded := string(attAnon.Data)
-
-	att := new(inTotoAttestation)
-	err := json.Unmarshal([]byte(attDecoded), att)
-	if err != nil {
-		log.Debug("Error parsing attestation")
-		return nil, err
-	}
-
-	if att.PredicateType == "" {
-		log.Debug("Error parsing attestation")
-		return nil, errors.New("attestation predicate type was not found")
-	}
-	if att.PredicateType != "http://lumjjb/sbom-documents" {
-		log.Debug("Error parsing attestation")
-		return nil, errors.New("in-toto predicate type is not recognized by Syft")
-	}
-
-	// If pred type does not match up with lumjjbPredType, will there be an error??
-
-	return att, nil
-
+	return atts, nil
 }
 
-func parseSbom(spdxBytes []byte) (*spdx.Document2_2, error) {
+func parseSboms(spdxBytesList map[*inTotoAttestation][]byte) (map[*inTotoAttestation]spdx.Document2_2, error) {
 
-	//remove all SHA512 hashes because spdx/tools-golang does not support
-	// PR fix is filed but not merged
+	sboms := make(map[*inTotoAttestation]spdx.Document2_2)
+	for att, spdxBytes := range spdxBytesList {
+		//remove all SHA512 hashes because spdx/tools-golang does not support
+		// PR fix is filed but not merged
 
-	regex, err := regexp.Compile("\n.*SHA512.*")
-	if err != nil {
-		log.Debug("Error decoding sbom to syft type")
-		return nil, err
+		regex, err := regexp.Compile("\n.*SHA512.*")
+		if err != nil {
+			log.Debug("Error decoding sbom to syft type")
+			return nil, err
+		}
+
+		spdxBytes = regex.ReplaceAll(spdxBytes, nil)
+		sbom, err := tvloader.Load2_2(bytes.NewReader(spdxBytes))
+		if err != nil {
+			log.Debug("Error loading sbom bytes into spdx type")
+			return nil, err
+		}
+
+		sboms[att] = *sbom
 	}
 
-	spdxBytes = regex.ReplaceAll(spdxBytes, nil)
-
-	os.WriteFile("original-sbom.spdx", spdxBytes, 0644)
-
-	sbom, err := tvloader.Load2_2(bytes.NewReader(spdxBytes))
-	if err != nil {
-		log.Debug("Error loading sbom bytes into spdx type")
-		return nil, err
-	}
-
-	return sbom, nil
+	return sboms, nil
 }
 
-func getSbomData(sbom *spdx.Document2_2) string {
-	return sbom.CreationInfo.DocumentNamespace
+func formatSbomPackageName(att *inTotoAttestation) string {
+	repo := att.Predicate.BuildMetadata.ArtifactSourceRepo
+	commit := att.Predicate.BuildMetadata.ArtifactSourceRepoCommit
+	if repo == "" {
+		return ""
+	}
+	if commit == "" {
+		return repo
+	}
+	return fmt.Sprintf("%v@%v", repo, commit)
+}
+
+func joinSbomsWithMetadata(sboms map[*inTotoAttestation]spdx.Document2_2) []spdxSbomWithMetadata {
+
+	var sbomsWithMetadata []spdxSbomWithMetadata
+	for att, sbom := range sboms {
+
+		packageName := formatSbomPackageName(att)
+		namespace := sbom.CreationInfo.DocumentNamespace
+
+		if packageName == "" {
+			packageName = namespace
+		}
+		if namespace == "" {
+			log.Debugf("sbom from rekor entry is malformed (does not have a namespace)")
+		} else {
+			sbomsWithMetadata = append(sbomsWithMetadata, spdxSbomWithMetadata{sbom: sbom, namespace: namespace, packageName: packageName})
+		}
+	}
+
+	return sbomsWithMetadata
+}
+
+// map a list of digests to a (sha1, sha256) tuple
+func parseDigests(digests []file.Digest) (string, string) {
+	var sha1 string
+	var sha256 string
+	if digests[0].Algorithm == "sha1" && digests[1].Algorithm == "sha256" {
+		sha1 = digests[0].Value
+		sha256 = digests[1].Value
+	} else if digests[0].Algorithm == "sha256" && digests[1].Algorithm == "sha1" {
+		sha256 = digests[0].Value
+		sha1 = digests[1].Value
+	} else {
+		log.Debug("Unexpected digests")
+		return "", ""
+	}
+
+	return sha1, sha256
 }
