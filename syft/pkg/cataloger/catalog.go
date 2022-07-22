@@ -10,6 +10,7 @@ import (
 	"github.com/anchore/syft/syft/linux"
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/common/cpe"
+	"github.com/anchore/syft/syft/rekor/queryRekor"
 	"github.com/anchore/syft/syft/source"
 	"github.com/hashicorp/go-multierror"
 	"github.com/wagoodman/go-partybus"
@@ -46,6 +47,8 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 	var allRelationships []artifact.Relationship
 
 	filesProcessed, packagesDiscovered := newMonitor()
+
+	uniqueLocations := make(map[source.Location]any)
 
 	// perform analysis, accumulating errors for each failed analysis
 	var errs error
@@ -85,6 +88,11 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 				allRelationships = append(allRelationships, owningRelationships...)
 			}
 
+			// generate set of unique locations for cataloged packages
+			for _, loc := range p.Locations.ToSlice() {
+				uniqueLocations[loc] = nil
+			}
+
 			// add to catalog
 			catalog.Add(p)
 		}
@@ -96,6 +104,22 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 
 	if errs != nil {
 		return nil, nil, errs
+	}
+
+	// try to retrieve an SBOM from Rekor
+	for loc := range uniqueLocations {
+		files, err := resolver.FilesByPath(loc.RealPath)
+		if err == nil {
+			log.Debugf("%v files found in location %v", len(files), loc.RealPath)
+		}
+
+		rels, err := queryRekor.CreateRekorSbomRels(resolver, loc)
+		if err != nil {
+			log.Debug(err)
+		}
+		if len(rels) != 0 {
+			allRelationships = append(allRelationships, rels...)
+		}
 	}
 
 	filesProcessed.SetCompleted()
