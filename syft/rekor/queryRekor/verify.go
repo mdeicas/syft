@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/anchore/syft/internal/log"
 	"github.com/sigstore/cosign/cmd/cosign/cli/fulcio/fulcioroots"
 	"github.com/sigstore/cosign/pkg/cosign"
 	"github.com/sigstore/rekor/pkg/generated/client"
@@ -26,7 +25,6 @@ TODOs
 func verifyLogEntry(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEntryAnon) error {
 	err := cosign.VerifyTLogEntry(ctx, rekorClient, entry)
 	if err != nil {
-		log.Debug("Error verifying Rekor entry")
 		return err
 	}
 	return nil
@@ -42,11 +40,8 @@ func verifyCert(rekorClient *client.Rekor, cert *x509.Certificate) error {
 
 	_, err := cosign.ValidateAndUnpackCert(cert, certCheckOpts)
 	if err != nil {
-		log.Debug("certificate could not be verified")
 		return err
 	}
-
-	// would use the verifier returned by the previous call to verify the signature over the attestation
 
 	return nil
 }
@@ -62,8 +57,6 @@ func verifyEntryTimestamp(cert *x509.Certificate, entry *models.LogEntryAnon) er
 // No error means that the attestation we have and the attestation referenced in rekor are equal, NOT that it is what the user intended to upload ***
 func verifyAttestationHash(encounteredAttestation string, intotoV001 *models.IntotoV001Schema) error {
 
-	// TODO: clean up decoding and add verification of signature
-
 	attBytes := []byte(encounteredAttestation)
 	hasher := sha256.New()
 	hasher.Write(attBytes)
@@ -72,13 +65,12 @@ func verifyAttestationHash(encounteredAttestation string, intotoV001 *models.Int
 
 	alg := *intotoV001.Content.Hash.Algorithm
 	if alg != "sha256" {
-		log.Debug("Error verifying attestation hash")
 		return errors.New("hash algorithm is not sha256")
 	}
 	expectedHash := *intotoV001.Content.PayloadHash.Value
 
 	if encounteredHash != expectedHash {
-		return errors.New("the attestation hash could not be verified")
+		return fmt.Errorf("%v does not equal %v", encounteredHash, expectedHash)
 	}
 
 	return nil
@@ -89,36 +81,32 @@ func Verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEnt
 
 	err := verifyLogEntry(ctx, rekorClient, entry)
 	if err != nil {
-		return err
+		return fmt.Errorf("log entry could not be verified: %w", err)
 	}
 
 	intotoV001, err := parseEntry(entry)
 	if err != nil {
-		return err
+		return fmt.Errorf("log entry body could not be parsed: %w", err)
 	}
 
 	cert, err := parseCert(string(*intotoV001.PublicKey))
 	if err != nil {
-		return err
+		return fmt.Errorf("certificate could not be parsed: %w", err)
 	}
 
 	err = verifyCert(rekorClient, cert)
 	if err != nil {
-		return err
+		return fmt.Errorf("certificate could not be verified: %w", err)
 	}
 
 	err = verifyEntryTimestamp(cert, entry)
 	if err != nil {
-		return err
+		return fmt.Errorf("certificate timestamp could not be verified: %w", err)
 	}
 
 	err = verifyAttestationHash(string(entry.Attestation.Data), intotoV001)
 	if err != nil {
-		return err
-	}
-
-	if err == nil {
-		log.Debugf("Verification of Rekor entry %v complete", *entry.LogIndex)
+		return fmt.Errorf("the attestation hash could not be verified: %w", err)
 	}
 
 	return nil
@@ -134,8 +122,7 @@ func VerifySbomHash(att *inTotoAttestation, sbomBytes []byte) error {
 	decodedHash := fmt.Sprintf("%x", hash)
 
 	if decodedHash != expectedHash {
-		log.Debug("Error verifying Sbom hash")
-		return errors.New("SBOM hash and expected hash from attestation do not match")
+		return fmt.Errorf("%v is not equal to %v", decodedHash, expectedHash)
 	}
 
 	return nil

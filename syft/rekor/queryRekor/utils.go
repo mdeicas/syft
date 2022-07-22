@@ -8,10 +8,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 
-	"github.com/anchore/syft/internal/log"
 	"github.com/sigstore/cosign/pkg/cosign"
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/spdx/tools-golang/spdx"
@@ -94,13 +92,12 @@ func parseCert(decodedCert string) (*x509.Certificate, error) {
 
 	pem, _ := pem.Decode([]byte(decodedCert))
 	if pem == nil {
-		return nil, errors.New("certificate could not be found")
+		return nil, errors.New("certificate could not be decoded")
 	}
 
 	cert, err := x509.ParseCertificate(pem.Bytes)
 	if err != nil {
-		log.Debug("Error parsing x509 certificate")
-		return nil, err
+		return nil, fmt.Errorf("error parsing x509 certificate: %w", err)
 	}
 	return cert, err
 }
@@ -115,47 +112,39 @@ func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
 
 	bodyDecoded, err := base64.StdEncoding.DecodeString(bodyEncoded)
 	if err != nil {
-		log.Debug("Error base64 decoding body")
-		return nil, err
+		return nil, fmt.Errorf("error base64 decoding body: %w", err)
 	}
 
 	var intoto *models.Intoto = new(models.Intoto)
 	err = intoto.UnmarshalBinary(bodyDecoded)
 	if err != nil {
-		log.Debug("Error unmarshaling json entry body to intoto")
-		return nil, err
+		return nil, fmt.Errorf("error unmarshaling json entry body to intoto: %w", err)
 	}
 
-	// TODO: validate
 	if *intoto.APIVersion != "0.0.1" {
-		log.Debug("Error parsing rekor entry body")
-		err := fmt.Sprintf("intoto schema version %v not supported", *intoto.APIVersion)
-		return nil, errors.New(err)
+		return nil, fmt.Errorf("intoto schema version %v not supported", *intoto.APIVersion)
 	}
 
 	specBytes, err := json.Marshal(intoto.Spec)
 	if err != nil {
-		log.Debug("error marshaling intoto spec to json")
-		return nil, err
+		return nil, fmt.Errorf("error marshaling intoto spec to json: %w", err)
 	}
 
 	intotoV001 := new(models.IntotoV001Schema)
 	err = intotoV001.UnmarshalBinary(specBytes)
 	if err != nil {
-		log.Debug("Error unmarshaling intoto spec to intotoV001 schema")
-		return nil, err
+		return nil, fmt.Errorf("Error unmarshaling intoto spec to intotoV001 schema: %w", err)
 	}
 
-	return intotoV001, err
+	return intotoV001, nil
 }
 
 // parse the attestation and unmarshal json
-func parseAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
+func parseAndValidateAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
 
 	attAnon := entry.Attestation
 	if attAnon == nil {
-		log.Debug("Error parsing attestation")
-		return nil, errors.New("log entry attestation is nil")
+		return nil, errors.New("attestation is nil")
 	}
 
 	// this decodes the base64 string
@@ -164,20 +153,19 @@ func parseAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
 	att := new(inTotoAttestation)
 	err := json.Unmarshal([]byte(attDecoded), att)
 	if err != nil {
-		log.Debug("Error parsing attestation")
-		return nil, err
+		return nil, fmt.Errorf("error unmarshaling attestation to inTotoAttestation type", err)
 	}
 
 	if att.PredicateType == "" {
-		log.Debug("Error parsing attestation")
-		return nil, errors.New("attestation predicate type was not found")
+		return nil, errors.New("entry could not be parsed as an sbom entry: predicate type is nil")
 	}
 	if att.PredicateType != "http://lumjjb/sbom-documents" {
-		log.Debug("Error parsing attestation")
-		return nil, errors.New("in-toto predicate type is not recognized by Syft")
+		return nil, errors.New("entry could not be parsed as an sbom entry: in-toto predicate type is not recognized by Syft")
 	}
 
-	// If pred type does not match up with lumjjbPredType, will there be an error??
+	if att.Predicate.Sboms == nil {
+		return nil, errors.New("entry could not be parsed as an sbom entry: attestation has no sboms")
+	}
 
 	return att, nil
 
@@ -190,18 +178,13 @@ func parseSbom(spdxBytes []byte) (*spdx.Document2_2, error) {
 
 	regex, err := regexp.Compile("\n.*SHA512.*")
 	if err != nil {
-		log.Debug("Error decoding sbom to syft type")
-		return nil, err
+		return nil, fmt.Errorf("error compiling regex")
 	}
 
 	spdxBytes = regex.ReplaceAll(spdxBytes, nil)
-
-	os.WriteFile("original-sbom.spdx", spdxBytes, 0644)
-
 	sbom, err := tvloader.Load2_2(bytes.NewReader(spdxBytes))
 	if err != nil {
-		log.Debug("Error loading sbom bytes into spdx type")
-		return nil, err
+		return nil, fmt.Errorf("error loading sbomBytes into spdx.Document2_2 type: %w", err)
 	}
 
 	return sbom, nil

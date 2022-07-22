@@ -2,6 +2,7 @@ package queryRekor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -18,57 +19,58 @@ const (
 	DefaultRekorAddr = "https://rekor.sigstore.dev"
 )
 
+type entryData struct {
+	entry       models.LogEntryAnon
+	entryBody   models.IntotoV001Schema
+	att         inTotoAttestation
+	sbom        []byte
+	namespace   string
+	packageName string
+}
+
 func getSbom(att *inTotoAttestation) ([]byte, error) {
 	// TODO: deal with multiple sboms
 	uri := att.Predicate.Sboms[0].Uri
 
 	req, err := http.NewRequest("GET", uri, nil)
 	if err != nil {
-		log.Debug("Error creating SBOM request")
-		return nil, err
+		return nil, fmt.Errorf("error creating http request: %w", err)
 	}
 
 	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Debug("Error making SBOM request")
-		return nil, err
+		return nil, fmt.Errorf("error making http request: %w", err)
 	}
 
 	bytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Debug("Error reading SBOM response")
-		return nil, err
+		return nil, fmt.Errorf("error reading http response: %w", err)
 	}
 
-	log.Debugf("SBOM (%v bytes) retrieved", len(bytes))
 	return bytes, nil
 }
 
 // retrieve Rekor entries associated with an sha hash and return their UUIDS
 func getUuids(sha string, client *client.Rekor) ([]string, error) {
-	// TODO: deal with no entries being returned
-	// set up query
+
 	query := &models.SearchIndex{Hash: sha}
 	var params *index.SearchIndexParams = index.NewSearchIndexParams().WithQuery(query)
 
 	res, err := client.Index.SearchIndex(params)
 	if err != nil {
-		log.Debug("error searching rekor by hash")
 		return nil, err
 	}
-	payload := (*res).Payload
+	payload := res.Payload
 	return payload, nil
 }
 
 // retrieve a Rekor entry by its UUID
 func getRekorEntry(uuid string, client *client.Rekor) (models.LogEntry, error) {
-	// TODO: models.LogEntry is a map from strings to LogEntryAnon. In what case would there by multiple entries returned?
 
 	params := entries.NewGetLogEntryByUUIDParams().WithEntryUUID(uuid)
 	res, err := client.Entries.GetLogEntryByUUID(params)
 	if err != nil {
-		log.Debug("error getting rekor entry by uuid")
 		return nil, err
 	}
 
@@ -84,6 +86,55 @@ func NewRekorClient() (*client.Rekor, error) {
 		return nil, err
 	}
 	return client, nil
+}
+
+func GetAndVerifySbom3(uuid string, client *client.Rekor) (*spdx.Document2_2, error) {
+
+	logEntry, err := getRekorEntry(uuid, client)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving Rekor entry by uuid %v: \n\t\t%w", uuid, err)
+	}
+
+	// logEntry is a map from strings to logEntryAnons
+	var logEntryAnon models.LogEntryAnon
+	for k, _ := range logEntry {
+		logEntryAnon = logEntry[k]
+	}
+
+	logIndex := logEntryAnon.LogIndex
+	log.Debugf("Rekor entry was retrieved \n\t\tlogIndex: %v ", logIndex)
+
+	ctx := context.Background()
+	err = Verify(ctx, client, &logEntryAnon)
+	if err != nil {
+		return nil, fmt.Errorf("rekor log entry %v could not be verified: \n\t\t%w", logIndex, err)
+	}
+
+	log.Debugf("Verification of Rekor entry %v complete", logIndex)
+
+	att, err := parseAndValidateAttestation(&logEntryAnon)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing rekor entry %v attestation: \n\t\t%w", logIndex, err)
+	}
+
+	sbomBytes, err := getSbom(att)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving sbom from Rekor entry %v: \n\t\t%w", logIndex, err)
+	}
+
+	log.Debugf("SBOM (%v bytes) retrieved", len(sbomBytes))
+
+	err = VerifySbomHash(att, sbomBytes)
+	if err != nil {
+		return nil, fmt.Errorf("error verifying sbom hash from Rekor entry %v: \n\t\t%w", logIndex, err)
+	}
+
+	sbom, err := parseSbom(sbomBytes)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing sbom from Rekor entry %v: %w", logIndex, err)
+	}
+
+	return sbom, nil
 }
 
 func GetAndVerifySbom(sha string, client *client.Rekor) (*spdx.Document2_2, error) {
@@ -117,7 +168,7 @@ func GetAndVerifySbom(sha string, client *client.Rekor) (*spdx.Document2_2, erro
 		return nil, nil
 	}
 
-	att, err := parseAttestation(&logEntry)
+	att, err := parseAndValidateAttestation(&logEntry)
 	if err != nil {
 		log.Debug("no error should occur here but one did")
 		log.Debug("err")
