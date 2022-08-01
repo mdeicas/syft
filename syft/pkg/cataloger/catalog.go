@@ -90,7 +90,7 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 
 			// generate set of unique locations for cataloged packages
 			for _, loc := range p.Locations.ToSlice() {
-				uniqueLocations[loc] = nil
+				uniqueLocations[loc] = true
 			}
 
 			// add to catalog
@@ -106,19 +106,18 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 		return nil, nil, errs
 	}
 
-	// try to retrieve an SBOM from Rekor
+	// try to retrieve SBOMs from Rekor
 	for loc := range uniqueLocations {
 		files, err := resolver.FilesByPath(loc.RealPath)
 		if err == nil {
 			log.Debugf("%v files found in location %v", len(files), loc.RealPath)
 		}
 
-		rel, err := queryRekor.CreateRekorSbomRel(resolver, loc)
+		rels, err := queryRekor.CreateRekorSbomRels(resolver, loc)
 		if err != nil {
 			log.Debug(err)
-		}
-		if rel != nil {
-			allRelationships = append(allRelationships, *rel)
+		} else if rels != nil {
+			allRelationships = append(allRelationships, rels...)
 		}
 	}
 

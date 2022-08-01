@@ -17,7 +17,7 @@ func main() {
 		return
 	}
 
-	_, err = rekor.GetAndVerifySbom(sha, client)
+	_, err = rekor.GetAndVerifySboms(sha, client)
 	if err != nil {
 		fmt.Println(err)
 		return

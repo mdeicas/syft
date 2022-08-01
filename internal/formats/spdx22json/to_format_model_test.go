@@ -25,7 +25,7 @@ func Test_toExternalDocumentRefs(t *testing.T) {
 		Name: "Hello World Package 2",
 	}
 	externalRef_1 := queryRekor.NewExternalRef("HelloWorld", "www.example.com", "SHA1", "bogushash")
-	externalRef_2 := queryRekor.NewExternalRef("HelloWorld", "www.example.com", "sha1", "bogushash")
+	externalRef_2 := queryRekor.NewExternalRef("Test", "www.test.com", "sha1", "testhash")
 
 	tests := []struct {
 		name          string
@@ -68,9 +68,9 @@ func Test_toExternalDocumentRefs(t *testing.T) {
 			},
 			expected: []model.ExternalDocumentRef{
 				{
-					ExternalDocumentID: model.ElementID(externalRef_1.ID()).String(),
-					Checksum:           model.Checksum{Algorithm: "SHA1", ChecksumValue: "bogushash"},
-					SpdxDocument:       externalRef_1.SpdxRef.URI,
+					ExternalDocumentID: model.ElementID(externalRef_2.ID()).String(),
+					Checksum:           model.Checksum{Algorithm: "SHA1", ChecksumValue: "testhash"},
+					SpdxDocument:       externalRef_2.SpdxRef.URI,
 				},
 			},
 		},

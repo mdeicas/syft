@@ -51,8 +51,7 @@ func toExternalDocumentRefs(relationships []artifact.Relationship) []model.Exter
 	var externalRefs []model.ExternalDocumentRef
 	for _, rel := range relationships {
 
-		externalRef, ok := rel.To.(queryRekor.ExternalRef)
-		if ok {
+		if externalRef, ok := rel.To.(queryRekor.ExternalRef); ok {
 			externalRefDocument := model.ExternalDocumentRef{
 				ExternalDocumentID: model.ElementID(rel.To.ID()).String(),
 				Checksum: model.Checksum{

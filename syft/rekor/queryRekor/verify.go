@@ -8,78 +8,70 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sigstore/cosign/cmd/cosign/cli/fulcio/fulcioroots"
 	"github.com/sigstore/cosign/pkg/cosign"
 	"github.com/sigstore/rekor/pkg/generated/client"
 	"github.com/sigstore/rekor/pkg/generated/models"
+	"github.com/sigstore/sigstore/pkg/fulcioroots"
 )
 
-/*
-TODOs
-	- make more robust
-		- gracefully handle missing fields, make more robust, etc. structs, after marshalling, could have missing fields.
-		- deal with different attestation and different predicate types
-*/
-
-// verify the inclusion proof
-func verifyLogEntry(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEntryAnon) error {
-	err := cosign.VerifyTLogEntry(ctx, rekorClient, entry)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// verify the certificate
+// verifyCert verifies that the certificate chains up to the fulcio root and verifies identities in the certificate with certCheckOpts.
+// Precondition: rekorClient and cert are not nil
 func verifyCert(rekorClient *client.Rekor, cert *x509.Certificate) error {
-
-	certCheckOpts.RekorClient = rekorClient
-	// this code is now in sigstore, not cosign. Will break when cosign dependency updates
-	certCheckOpts.RootCerts = fulcioroots.Get()
-	certCheckOpts.IntermediateCerts = fulcioroots.GetIntermediates()
-
-	_, err := cosign.ValidateAndUnpackCert(cert, certCheckOpts)
+	rootCerts, err := fulcioroots.Get()
 	if err != nil {
-		return err
+		return fmt.Errorf("error getting fulcio roots: %w", err)
 	}
 
-	return nil
+	intCerts, err := fulcioroots.GetIntermediates()
+	if err != nil {
+		return fmt.Errorf("error getting fulcio intermediate certs: %w", err)
+	}
+
+	certCheckOpts := &cosign.CheckOpts{
+		RekorClient:       rekorClient,
+		RootCerts:         rootCerts,
+		IntermediateCerts: intCerts,
+	}
+
+	_, err = cosign.ValidateAndUnpackCert(cert, certCheckOpts)
+	return err
 }
 
-// return an error if the log entry timestamp is not within the certificate valid time range
+// verifyEntryTimestamp returns an error if the log entry timestamp is not within the certificate valid time range.
+//
+// Precondition: entry and entry.IntegratedTime is not nil
 func verifyEntryTimestamp(cert *x509.Certificate, entry *models.LogEntryAnon) error {
 	time := time.Unix(*entry.IntegratedTime, 0)
 	return cosign.CheckExpiry(cert, time)
 }
 
-// verify the attestation hash equals the hash in the rekor entry body.
-// *** This does NOT verify any signature.
-// No error means that the attestation we have and the attestation referenced in rekor are equal, NOT that it is what the user intended to upload ***
+// verifyAttestationHash returns an error if the hash of the attestation we have is not equal to the payloadHash in the entry body
+//
+// **** Note that this does NOT verify the signature over the attestation. We trust Rekor for this. ****
 func verifyAttestationHash(encounteredAttestation string, intotoV001 *models.IntotoV001Schema) error {
-
-	attBytes := []byte(encounteredAttestation)
-	hasher := sha256.New()
-	hasher.Write(attBytes)
-	hash := hasher.Sum(nil)
-	encounteredHash := fmt.Sprintf("%x", hash)
-
-	alg := *intotoV001.Content.Hash.Algorithm
+	if intotoV001 == nil || intotoV001.Content == nil || intotoV001.Content.PayloadHash == nil || intotoV001.Content.PayloadHash.Algorithm == nil {
+		return errors.New("IntotoV001Schema value is missing fields")
+	}
+	alg := *intotoV001.Content.PayloadHash.Algorithm
 	if alg != "sha256" {
 		return errors.New("hash algorithm is not sha256")
 	}
 	expectedHash := *intotoV001.Content.PayloadHash.Value
 
+	attBytes := []byte(encounteredAttestation)
+	hash := sha256.Sum256([]byte(attBytes))
+	encounteredHash := fmt.Sprintf("%x", hash)
+
 	if encounteredHash != expectedHash {
 		return fmt.Errorf("%v does not equal %v", encounteredHash, expectedHash)
 	}
-
 	return nil
 }
 
-// verify the log entry is in Rekor, the certificate is valid, the log entry timestamp is valid, and the attestation hash is correct
+// Verify verifies that the log entry is in Rekor, the certificate is valid, the log entry timestamp is valid, and the attestation hash is correct.
+// Precondition: entry and rekorClient are not nil
 func Verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEntryAnon) error {
-
-	err := verifyLogEntry(ctx, rekorClient, entry)
+	err := cosign.VerifyTLogEntry(ctx, rekorClient, entry)
 	if err != nil {
 		return fmt.Errorf("log entry could not be verified: %w", err)
 	}
@@ -89,7 +81,11 @@ func Verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEnt
 		return fmt.Errorf("log entry body could not be parsed: %w", err)
 	}
 
-	cert, err := parseCert(string(*intotoV001.PublicKey))
+	certString := intotoV001.PublicKey
+	if certString == nil {
+		return errors.New("entry does not contain a certificate")
+	}
+	cert, err := parsePEMCert(string(*certString))
 	if err != nil {
 		return fmt.Errorf("certificate could not be parsed: %w", err)
 	}
@@ -112,19 +108,22 @@ func Verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEnt
 	return nil
 }
 
-func VerifySbomHash(att *inTotoAttestation, sbomBytes []byte) error {
-
+// VerifySbomHash verifies that the hash of the first SBOM in the attestation is equal to the hash of sbomBytes
+func VerifySbomHash(att *InTotoAttestation, sbomBytes *[]byte) error {
+	if att == nil {
+		return errors.New("attestation is nil")
+	}
+	if len(att.Predicate.Sboms) == 0 {
+		return errors.New("attestation has no sboms")
+	}
+	// take entry at index 0 because we currently do not handle multiple sboms within one attestation
 	expectedHash := att.Predicate.Sboms[0].Digest.Sha256
 
-	hasher := sha256.New()
-	hasher.Write(sbomBytes)
-	hash := hasher.Sum(nil)
+	hash := sha256.Sum256(*sbomBytes)
 	decodedHash := fmt.Sprintf("%x", hash)
 
 	if decodedHash != expectedHash {
 		return fmt.Errorf("%v is not equal to %v", decodedHash, expectedHash)
 	}
-
 	return nil
-
 }

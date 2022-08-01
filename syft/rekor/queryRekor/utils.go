@@ -9,64 +9,49 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
-	"github.com/sigstore/cosign/pkg/cosign"
+	"github.com/anchore/syft/syft/file"
+	"github.com/in-toto/in-toto-golang/in_toto"
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/spdx/tools-golang/spdx"
 	"github.com/spdx/tools-golang/tvloader"
 )
 
-var trustedCertIdentities = []cosign.Identity{
-	{Subject: "mdeicas@google.com", Issuer: "sigstore.dev"},
-	{Subject: "mdeicas@google.com", Issuer: "sigstore"},
-}
-
-// TODO: identities list is not working. Needs to work to verify github action runs because they don't have an email field
-var certCheckOpts = &cosign.CheckOpts{
-	//Identities: trustedCertIdentities,
-	//CertEmail: "mdeicas@google.com",
-
-	// Why is there an option to prove sigVerifier?
-	// addresses after SAN. what is this and should we check it
-
-}
+var (
+	//SbomPredicateType string = "google.com/sbom"
+	GoogleSbomPredicateType string = "http://lumjjb/sbom-documents"
+)
 
 type digest struct {
 	Sha256 string
 }
 
-type subject struct {
-	Name   string
-	Digest digest
-}
-
-type lumjjbSbomType struct {
+type sbomEntry struct {
 	Format string
 	Digest digest
 	Uri    string
 }
 
 type buildMetadata struct {
-	ArtifactSourceRepo             string `json:"artifact-source-repo"`
-	ArtifactSourceRepoCommit       string `json:"artifact-source-repo-commit"`
-	AttestationGeneratorRepo       string `json:"attestation-generator-repo"`
-	AttestationGeneratorRepoCommit string `json:"attestation-generator-repo-commit"`
+	ArtifactSourceRepo             string `json:"artifact-source-repo,omitempty"`
+	ArtifactSourceRepoCommit       string `json:"artifact-source-repo-commit omitempty"`
+	AttestationGeneratorRepo       string `json:"attestation-generator-repo,omitempty"`
+	AttestationGeneratorRepoCommit string `json:"attestation-generator-repo-commit,omitempty"`
 }
 
-type lumjjbPredType struct {
-	Sboms         []lumjjbSbomType
-	BuildMetadata buildMetadata `json:"build-metadata"`
+// Predicate type = "google.com/sbom"
+type GoogleSbomPredicate struct {
+	Sboms         []sbomEntry
+	BuildMetadata buildMetadata `json:"build-metadata,omitempty"`
 }
 
-type inTotoAttestation struct {
-	AttType       string `json:"_type"`
-	PredicateType string
-	Subject       []subject
-	Predicate     lumjjbPredType
+type InTotoAttestation struct {
+	in_toto.StatementHeader
+	Predicate GoogleSbomPredicate
 }
 
 func pprintCert(cert *x509.Certificate) {
-
 	s := fmt.Sprint(
 		"\n*** certificate *** \n",
 		"subject:", cert.Subject.CommonName,
@@ -79,16 +64,15 @@ func pprintCert(cert *x509.Certificate) {
 	fmt.Println(s)
 }
 
-func pprintStruct(v any) {
+func pprintStruct(v any) string {
 	json, err := json.MarshalIndent(v, "", "\t")
 	if err != nil {
 		fmt.Println(err)
 	}
-	fmt.Println(string(json))
+	return string(json)
 }
 
-// decode and parse certificate
-func parseCert(decodedCert string) (*x509.Certificate, error) {
+func parsePEMCert(decodedCert string) (*x509.Certificate, error) {
 
 	pem, _ := pem.Decode([]byte(decodedCert))
 	if pem == nil {
@@ -99,12 +83,25 @@ func parseCert(decodedCert string) (*x509.Certificate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error parsing x509 certificate: %w", err)
 	}
-	return cert, err
+	return cert, nil
 }
 
-// decode and marshall log entry body
+/*
+	at this point, the entry has already been verified
+	test
+		- missing body
+		- body is not base64 encoded
+		- body not string
+		- body does not map to IntotoV001Schema (missing info)
+		- body does not map to IntotoV0001Schema (extra info)
+		- regular input
+*/
+// parseEntry parses the entry body to a struct
+// Precondition: entry is not nil
 func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
-
+	if entry.Body == nil {
+		return nil, errors.New("entry body is nil")
+	}
 	bodyEncoded, ok := entry.Body.(string)
 	if !ok {
 		return nil, errors.New("attempted to parse entry body as string, but failed")
@@ -115,13 +112,13 @@ func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
 		return nil, fmt.Errorf("error base64 decoding body: %w", err)
 	}
 
-	var intoto *models.Intoto = new(models.Intoto)
+	intoto := &models.Intoto{}
 	err = intoto.UnmarshalBinary(bodyDecoded)
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling json entry body to intoto: %w", err)
 	}
 
-	if *intoto.APIVersion != "0.0.1" {
+	if intoto.APIVersion == nil || *intoto.APIVersion != "0.0.1" {
 		return nil, fmt.Errorf("intoto schema version %v not supported", *intoto.APIVersion)
 	}
 
@@ -130,36 +127,43 @@ func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
 		return nil, fmt.Errorf("error marshaling intoto spec to json: %w", err)
 	}
 
-	intotoV001 := new(models.IntotoV001Schema)
+	intotoV001 := &models.IntotoV001Schema{}
 	err = intotoV001.UnmarshalBinary(specBytes)
 	if err != nil {
-		return nil, fmt.Errorf("Error unmarshaling intoto spec to intotoV001 schema: %w", err)
+		return nil, fmt.Errorf("error unmarshaling intoto spec to intotoV001 schema: %w", err)
 	}
 
 	return intotoV001, nil
 }
 
-// parse the attestation and unmarshal json
-func parseAndValidateAttestation(entry *models.LogEntryAnon) (*inTotoAttestation, error) {
+/*
 
+	test
+		- attestation is nil
+		- attestation.Data is ""
+		- attestation.Data is not base64 encoded
+		- attestation does not fit into InTotoAttestation (extra fields)
+		- attestation does not fit into InTotoAttestation (missing fields)
+		- regular input
+
+*/
+// parseAndValidateAttestation parses the entry's attestation to an attestation struct and validates the attestation predicate type
+//
+// Precondition: entry is not nil
+func parseAndValidateAttestation(entry *models.LogEntryAnon) (*InTotoAttestation, error) {
 	attAnon := entry.Attestation
 	if attAnon == nil {
 		return nil, errors.New("attestation is nil")
 	}
 
-	// this decodes the base64 string
 	attDecoded := string(attAnon.Data)
-
-	att := new(inTotoAttestation)
+	att := &InTotoAttestation{}
 	err := json.Unmarshal([]byte(attDecoded), att)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling attestation to inTotoAttestation type", err)
+		return nil, fmt.Errorf("error unmarshaling attestation to inTotoAttestation type: %w", err)
 	}
 
-	if att.PredicateType == "" {
-		return nil, errors.New("entry could not be parsed as an sbom entry: predicate type is nil")
-	}
-	if att.PredicateType != "http://lumjjb/sbom-documents" {
+	if att.PredicateType != GoogleSbomPredicateType {
 		return nil, errors.New("entry could not be parsed as an sbom entry: in-toto predicate type is not recognized by Syft")
 	}
 
@@ -168,21 +172,25 @@ func parseAndValidateAttestation(entry *models.LogEntryAnon) (*inTotoAttestation
 	}
 
 	return att, nil
-
 }
 
-func parseSbom(spdxBytes []byte) (*spdx.Document2_2, error) {
-
-	//remove all SHA512 hashes because spdx/tools-golang does not support
-	// PR fix is filed but not merged
+/*
+test
+  - bytes is empty list
+  - bytes is not a valid spdx document
+  - regular input
+*/
+func parseSbom(spdxBytes *[]byte) (*spdx.Document2_2, error) {
+	// remove all SHA512 hashes because spdx/tools-golang does not support
+	// PR fix is filed but not merged: https://github.com/spdx/tools-golang/pull/139
 
 	regex, err := regexp.Compile("\n.*SHA512.*")
 	if err != nil {
 		return nil, fmt.Errorf("error compiling regex")
 	}
 
-	spdxBytes = regex.ReplaceAll(spdxBytes, nil)
-	sbom, err := tvloader.Load2_2(bytes.NewReader(spdxBytes))
+	modifiedSpdxBytes := regex.ReplaceAll(*spdxBytes, nil)
+	sbom, err := tvloader.Load2_2(bytes.NewReader(modifiedSpdxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("error loading sbomBytes into spdx.Document2_2 type: %w", err)
 	}
@@ -190,6 +198,17 @@ func parseSbom(spdxBytes []byte) (*spdx.Document2_2, error) {
 	return sbom, nil
 }
 
-func getSbomData(sbom *spdx.Document2_2) string {
-	return sbom.CreationInfo.DocumentNamespace
+/*
+	test
+		- no digests
+		- regular input
+*/
+// parseDigests takes a list of digests to an spdx.CheckSumAlgorithm : value map
+func parseDigests(digests []file.Digest) map[spdx.ChecksumAlgorithm]string {
+	hashes := make(map[spdx.ChecksumAlgorithm]string)
+	for _, digest := range digests {
+		alg := spdx.ChecksumAlgorithm(strings.ToUpper(digest.Algorithm))
+		hashes[alg] = digest.Value
+	}
+	return hashes
 }
