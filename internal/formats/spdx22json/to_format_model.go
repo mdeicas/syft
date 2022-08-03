@@ -14,7 +14,7 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
-	"github.com/anchore/syft/syft/rekor/queryRekor"
+	"github.com/anchore/syft/syft/rekor"
 	"github.com/anchore/syft/syft/sbom"
 	"github.com/anchore/syft/syft/source"
 )
@@ -51,7 +51,7 @@ func toExternalDocumentRefs(relationships []artifact.Relationship) []model.Exter
 	var externalRefs []model.ExternalDocumentRef
 	for _, rel := range relationships {
 
-		if externalRef, ok := rel.To.(queryRekor.ExternalRef); ok {
+		if externalRef, ok := rel.To.(rekor.ExternalRef); ok {
 			externalRefDocument := model.ExternalDocumentRef{
 				ExternalDocumentID: model.ElementID(rel.To.ID()).String(),
 				Checksum: model.Checksum{

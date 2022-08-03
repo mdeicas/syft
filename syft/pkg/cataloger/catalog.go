@@ -10,7 +10,7 @@ import (
 	"github.com/anchore/syft/syft/linux"
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/common/cpe"
-	"github.com/anchore/syft/syft/rekor/queryRekor"
+	"github.com/anchore/syft/syft/rekor"
 	"github.com/anchore/syft/syft/source"
 	"github.com/hashicorp/go-multierror"
 	"github.com/wagoodman/go-partybus"
@@ -107,18 +107,23 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 	}
 
 	// try to retrieve SBOMs from Rekor
-	for loc := range uniqueLocations {
-		files, err := resolver.FilesByPath(loc.RealPath)
-		if err == nil {
-			log.Debugf("%v files found in location %v", len(files), loc.RealPath)
-		}
+	queryRekorClient, err := rekor.NewClient()
+	if err == nil {
+		for loc := range uniqueLocations {
+			files, err := resolver.FilesByPath(loc.RealPath)
+			if err == nil {
+				log.Debugf("%v files found in location %v", len(files), loc.RealPath)
+			}
 
-		rels, err := queryRekor.CreateRekorSbomRels(resolver, loc)
-		if err != nil {
-			log.Debug(err)
-		} else if rels != nil {
-			allRelationships = append(allRelationships, rels...)
+			rels, err := rekor.CreateRekorSbomRels(resolver, loc, queryRekorClient)
+			if err != nil {
+				log.Debug(err)
+			} else if rels != nil {
+				allRelationships = append(allRelationships, rels...)
+			}
 		}
+	} else {
+		log.Debugf("error creating queryRekor client: %v", err)
 	}
 
 	filesProcessed.SetCompleted()

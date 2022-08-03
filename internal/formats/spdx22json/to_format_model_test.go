@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/anchore/syft/syft/pkg"
-	"github.com/anchore/syft/syft/rekor/queryRekor"
+	"github.com/anchore/syft/syft/rekor"
 
 	"github.com/anchore/syft/syft/file"
 
@@ -24,8 +24,8 @@ func Test_toExternalDocumentRefs(t *testing.T) {
 	package_2 := pkg.Package{
 		Name: "Hello World Package 2",
 	}
-	externalRef_1 := queryRekor.NewExternalRef("HelloWorld", "www.example.com", "SHA1", "bogushash")
-	externalRef_2 := queryRekor.NewExternalRef("Test", "www.test.com", "sha1", "testhash")
+	externalRef_1 := rekor.NewExternalRef("HelloWorld", "www.example.com", "SHA1", "bogushash")
+	externalRef_2 := rekor.NewExternalRef("Test", "www.test.com", "sha1", "testhash")
 
 	tests := []struct {
 		name          string

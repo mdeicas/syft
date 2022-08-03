@@ -1,14 +1,17 @@
-package queryRekor
+package rekor
 
 import (
 	"context"
+	"crypto"
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/anchore/syft/internal/log"
-	"github.com/sigstore/cosign/cmd/cosign/cli/rekor"
+	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/source"
 	"github.com/sigstore/rekor/pkg/generated/client"
 	"github.com/sigstore/rekor/pkg/generated/client/entries"
 	"github.com/sigstore/rekor/pkg/generated/client/index"
@@ -16,25 +19,16 @@ import (
 	"github.com/spdx/tools-golang/spdx"
 )
 
-const (
-	DefaultRekorAddr = "https://rekor.sigstore.dev"
-)
-
 // getSbom attempts to retrieve the SBOM from the URI.
-// precondition of not nil attestation currently not enforced anywhere
-func getSbom(att *InTotoAttestation) (*[]byte, error) {
+//
+// Precondition: att is not nil and client is not nil
+func getSbom(att *InTotoAttestation, client *http.Client) (*[]byte, error) {
 	if len(att.Predicate.Sboms) > 1 {
 		log.Info("Attestation found on Rekor with multiple SBOMS, which is not currently supported. Proceeding with the first SBOM.")
 	}
 	uri := att.Predicate.Sboms[0].Uri
 
-	req, err := http.NewRequest("GET", uri, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating http request: %w", err)
-	}
-
-	client := http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Get(uri)
 	if err != nil {
 		return nil, fmt.Errorf("error making http request: %w", err)
 	}
@@ -80,18 +74,9 @@ func getRekorEntry(uuid string, client *client.Rekor) (models.LogEntry, error) {
 	return res.Payload, nil
 }
 
-func NewRekorClient() (*client.Rekor, error) {
-	client, err := rekor.NewClient(DefaultRekorAddr)
-	if err != nil {
-		log.Debug("Error creating Rekor client")
-		return nil, err
-	}
-	return client, nil
-}
-
-// Precondition: client is not nil
-func getAndVerifySbomFromUuid(uuid string, client *client.Rekor) (*spdx.Document2_2, error) {
-	logEntry, err := getRekorEntry(uuid, client)
+// Precondition: client and its fields are not nil
+func getAndVerifySbomFromUuid(uuid string, client *Client) (*sbomWithDigest, error) {
+	logEntry, err := getRekorEntry(uuid, client.rekorClient)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving Rekor entry by uuid %v: \n\t\t%w", uuid, err)
 	}
@@ -109,7 +94,7 @@ func getAndVerifySbomFromUuid(uuid string, client *client.Rekor) (*spdx.Document
 	log.Debugf("Rekor entry was retrieved \n\t\tlogIndex: %v ", logIndex)
 
 	ctx := context.Background()
-	err = Verify(ctx, client, &logEntryAnon)
+	err = verify(ctx, client.rekorClient, &logEntryAnon)
 	if err != nil {
 		return nil, fmt.Errorf("rekor log entry %v could not be verified: \n\t\t%w", logIndex, err)
 	}
@@ -118,39 +103,47 @@ func getAndVerifySbomFromUuid(uuid string, client *client.Rekor) (*spdx.Document
 
 	att, err := parseAndValidateAttestation(&logEntryAnon)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing rekor entry %v attestation: \n\t\t%w", logIndex, err)
+		return nil, fmt.Errorf("error parsing or validating rekor entry %v attestation: \n\t\t%w", logIndex, err)
 	}
 
-	sbomBytes, err := getSbom(att)
+	sbomBytes, err := getSbom(att, client.httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving sbom from Rekor entry %v: \n\t\t%w", logIndex, err)
 	}
 
 	log.Debugf("SBOM (%v bytes) retrieved", len(*sbomBytes))
 
-	err = VerifySbomHash(att, sbomBytes)
+	err = verifySbomHash(att, sbomBytes)
 	if err != nil {
-		return nil, fmt.Errorf("error verifying sbom hash from Rekor entry %v: \n\t\t%w", logIndex, err)
+		return nil, fmt.Errorf("could not verify retrieved sbom (from Rekor entry %v): \n\t\t%w", logIndex, err)
 	}
+
+	sbomSha1 := sha1.Sum(*sbomBytes)
+	decodedHash := fmt.Sprintf("%x", sbomSha1)
 
 	sbom, err := parseSbom(sbomBytes)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing sbom from Rekor entry %v: %w", logIndex, err)
 	}
 
-	return sbom, nil
+	sbomWrapped := &sbomWithDigest{
+		sha1: decodedHash,
+		spdx: sbom,
+	}
+
+	return sbomWrapped, nil
 }
 
 // GetAndVerifySboms retrieves Rekor entries associated with an sha256 hash and verifies the entries and the sboms
 //
-// Precondition: client is not nil
-func GetAndVerifySboms(sha string, client *client.Rekor) ([]*spdx.Document2_2, error) {
-	uuids, err := getUuids(sha, client)
+// Precondition: client and its fields are not nil
+func getAndVerifySbomsFromHash(sha string, client *Client) ([]*sbomWithDigest, error) {
+	uuids, err := getUuids(sha, client.rekorClient)
 	if err != nil {
-		return nil, fmt.Errorf("error getting uuids on Rekor associated with hash %v: %w", sha, err)
+		return nil, fmt.Errorf("error getting uuids on Rekor associated with hash \"%v\": %w", sha, err)
 	}
 
-	var sboms []*spdx.Document2_2
+	var sboms []*sbomWithDigest
 	for _, uuid := range uuids {
 		sbom, err := getAndVerifySbomFromUuid(uuid, client)
 		if err != nil {
@@ -158,6 +151,31 @@ func GetAndVerifySboms(sha string, client *client.Rekor) ([]*spdx.Document2_2, e
 		} else {
 			sboms = append(sboms, sbom)
 		}
+	}
+
+	return sboms, nil
+}
+
+func getAndVerifySbomsFromResolver(resolver source.FileResolver, location source.Location, client *Client) ([]*sbomWithDigest, error) {
+	closer, err := resolver.FileContentsByLocation(location)
+	if err != nil {
+		return nil, fmt.Errorf("error getting reader from resolver: %w", err)
+	}
+
+	hashes := []crypto.Hash{crypto.SHA1, crypto.SHA256}
+	digests, err := file.DigestsFromFile(closer, hashes)
+	if err != nil {
+		return nil, fmt.Errorf("error generating digests from file %v: %w", location.RealPath, err)
+	}
+
+	digestMap := parseDigests(digests)
+	sha1, sha256 := digestMap[spdx.SHA1], digestMap[spdx.SHA256]
+
+	log.Debugf("Rekor is being queried for \n\t\tLocation: %v \n\t\tSHA1: %v \n\t\tSHA256: %v", location.RealPath, sha1, sha256)
+
+	sboms, err := getAndVerifySbomsFromHash(sha256, client)
+	if err != nil {
+		return nil, fmt.Errorf("error searching rekor in location %v: %w", location.RealPath, err)
 	}
 
 	return sboms, nil

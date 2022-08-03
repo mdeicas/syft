@@ -1,4 +1,4 @@
-package queryRekor
+package rekor
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 )
 
 // verifyCert verifies that the certificate chains up to the fulcio root and verifies identities in the certificate with certCheckOpts.
+//
 // Precondition: rekorClient and cert are not nil
 func verifyCert(rekorClient *client.Rekor, cert *x509.Certificate) error {
 	rootCerts, err := fulcioroots.Get()
@@ -69,11 +70,12 @@ func verifyAttestationHash(encounteredAttestation string, intotoV001 *models.Int
 }
 
 // Verify verifies that the log entry is in Rekor, the certificate is valid, the log entry timestamp is valid, and the attestation hash is correct.
+//
 // Precondition: entry and rekorClient are not nil
-func Verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEntryAnon) error {
+func verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEntryAnon) error {
 	err := cosign.VerifyTLogEntry(ctx, rekorClient, entry)
 	if err != nil {
-		return fmt.Errorf("log entry could not be verified: %w", err)
+		return fmt.Errorf("could not prove that the log entry is on rekor: %w", err)
 	}
 
 	intotoV001, err := parseEntry(entry)
@@ -109,7 +111,7 @@ func Verify(ctx context.Context, rekorClient *client.Rekor, entry *models.LogEnt
 }
 
 // VerifySbomHash verifies that the hash of the first SBOM in the attestation is equal to the hash of sbomBytes
-func VerifySbomHash(att *InTotoAttestation, sbomBytes *[]byte) error {
+func verifySbomHash(att *InTotoAttestation, sbomBytes *[]byte) error {
 	if att == nil {
 		return errors.New("attestation is nil")
 	}

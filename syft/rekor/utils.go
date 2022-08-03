@@ -1,4 +1,4 @@
-package queryRekor
+package rekor
 
 import (
 	"bytes"
@@ -51,21 +51,14 @@ type InTotoAttestation struct {
 	Predicate GoogleSbomPredicate
 }
 
-func pprintCert(cert *x509.Certificate) {
-	s := fmt.Sprint(
-		"\n*** certificate *** \n",
-		"subject:", cert.Subject.CommonName,
-		"\nsubject alternative name: email: ", cert.EmailAddresses,
-		"\nissuer: ", cert.Issuer.CommonName,
-		"\nnotBefore: ", cert.NotBefore.String(),
-		"\nnotAfter: ", cert.NotAfter.String(),
-		"\n*** certificate *** \n\n",
-	)
-	fmt.Println(s)
+type sbomWithDigest struct {
+	sha1 string
+	spdx *spdx.Document2_2
 }
 
 func pprintStruct(v any) string {
-	json, err := json.MarshalIndent(v, "", "\t")
+	//json, err := json.MarshalIndent(v, "", "\t")
+	json, err := json.Marshal(v)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -73,7 +66,6 @@ func pprintStruct(v any) string {
 }
 
 func parsePEMCert(decodedCert string) (*x509.Certificate, error) {
-
 	pem, _ := pem.Decode([]byte(decodedCert))
 	if pem == nil {
 		return nil, errors.New("certificate could not be decoded")
@@ -86,17 +78,8 @@ func parsePEMCert(decodedCert string) (*x509.Certificate, error) {
 	return cert, nil
 }
 
-/*
-	at this point, the entry has already been verified
-	test
-		- missing body
-		- body is not base64 encoded
-		- body not string
-		- body does not map to IntotoV001Schema (missing info)
-		- body does not map to IntotoV0001Schema (extra info)
-		- regular input
-*/
 // parseEntry parses the entry body to a struct
+//
 // Precondition: entry is not nil
 func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
 	if entry.Body == nil {
@@ -136,17 +119,6 @@ func parseEntry(entry *models.LogEntryAnon) (*models.IntotoV001Schema, error) {
 	return intotoV001, nil
 }
 
-/*
-
-	test
-		- attestation is nil
-		- attestation.Data is ""
-		- attestation.Data is not base64 encoded
-		- attestation does not fit into InTotoAttestation (extra fields)
-		- attestation does not fit into InTotoAttestation (missing fields)
-		- regular input
-
-*/
 // parseAndValidateAttestation parses the entry's attestation to an attestation struct and validates the attestation predicate type
 //
 // Precondition: entry is not nil
@@ -174,12 +146,6 @@ func parseAndValidateAttestation(entry *models.LogEntryAnon) (*InTotoAttestation
 	return att, nil
 }
 
-/*
-test
-  - bytes is empty list
-  - bytes is not a valid spdx document
-  - regular input
-*/
 func parseSbom(spdxBytes *[]byte) (*spdx.Document2_2, error) {
 	// remove all SHA512 hashes because spdx/tools-golang does not support
 	// PR fix is filed but not merged: https://github.com/spdx/tools-golang/pull/139
@@ -198,11 +164,6 @@ func parseSbom(spdxBytes *[]byte) (*spdx.Document2_2, error) {
 	return sbom, nil
 }
 
-/*
-	test
-		- no digests
-		- regular input
-*/
 // parseDigests takes a list of digests to an spdx.CheckSumAlgorithm : value map
 func parseDigests(digests []file.Digest) map[spdx.ChecksumAlgorithm]string {
 	hashes := make(map[spdx.ChecksumAlgorithm]string)
