@@ -8,6 +8,7 @@ import (
 	"github.com/anchore/syft/syft"
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/rekor"
 	"github.com/anchore/syft/syft/sbom"
 	"github.com/anchore/syft/syft/source"
 )
@@ -24,6 +25,7 @@ func Tasks(app *config.Application) ([]Task, error) {
 		generateCatalogSecretsTask,
 		generateCatalogFileClassificationsTask,
 		generateCatalogContentsTask,
+		generateRekorCatalogerTask,
 	}
 
 	for _, generator := range generators {
@@ -55,6 +57,32 @@ func generateCatalogPackagesTask(app *config.Application) (Task, error) {
 		results.LinuxDistribution = theDistro
 
 		return relationships, nil
+	}
+
+	return task, nil
+}
+
+func generateRekorCatalogerTask(app *config.Application) (Task, error) {
+	// TODO: only create task if enabled in external sources config
+	client, err := rekor.NewClient()
+	if err != nil {
+		return nil, fmt.Errorf("could create client for Rekor cataloger")
+	}
+
+	scope := source.SquashedScope // TODO: check config for scope
+	rekorCataloger := file.NewRekorCataloger(client)
+
+	task := func(results *sbom.Artifacts, src *source.Source) ([]artifact.Relationship, error) {
+		resolver, err := src.FileResolver(scope)
+		if err != nil {
+			return nil, err
+		}
+
+		rels, err := rekorCataloger.Catalog(resolver)
+		if err != nil {
+			return nil, err
+		}
+		return rels, nil
 	}
 
 	return task, nil
